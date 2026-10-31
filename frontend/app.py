@@ -1,16 +1,51 @@
-import os
-import requests
+
+import sys
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="AI Business Intelligence Assistant", page_icon="📊", layout="wide")
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+# Add the project root to Python's import path.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.database import initialize_database
+from backend.ai_interpreter import interpret_question
+from backend.analytics import run_analytics
+
+
+st.set_page_config(
+    page_title="AI Business Intelligence Assistant",
+    page_icon="📊",
+    layout="wide"
+)
+
+
+@st.cache_resource
+def setup_database():
+    return initialize_database()
+
 
 st.title("📊 Mini AI Business Intelligence Assistant")
-st.caption("Ask questions about sales transactions in natural language. Answers are calculated from SQLite data.")
+st.caption(
+    "Ask questions about sales transactions in natural language. "
+    "Answers are calculated from SQLite data."
+)
+
+# Initialize the SQLite database from the CSV file.
+try:
+    database_info = setup_database()
+    st.sidebar.success("Database connected successfully")
+    st.sidebar.metric("Loaded transactions", database_info["loaded_rows"])
+except Exception as error:
+    st.error(f"Database initialization failed: {error}")
+    st.stop()
+
 
 with st.sidebar:
     st.header("Try these questions")
+
     examples = [
         "What is the total revenue?",
         "Which product generated the highest revenue?",
@@ -18,47 +53,106 @@ with st.sidebar:
         "Which region generated the highest sales?",
         "Compare January 2026 and February 2026 revenue."
     ]
+
     for example in examples:
-        st.code(example, language=None)
+        st.write("• " + example)
+
     st.divider()
-    st.caption("Revenue = quantity × unit price − transaction discount. Only valid Completed transactions are included.")
+    st.caption(
+        "Only supported business analytics questions are processed."
+    )
 
-try:
-    health = requests.get(f"{API_URL}/health", timeout=3)
-    health.raise_for_status()
-    st.success("Backend connected")
-except requests.RequestException:
-    st.error("Cannot connect to the backend. Start FastAPI first: uvicorn backend.main:app --reload")
-    st.stop()
 
-question = st.text_input("Ask a sales question", placeholder="e.g. Which region generated the highest sales?")
-if st.button("Get answer", type="primary") and question.strip():
-    try:
-        response = requests.post(f"{API_URL}/ask", json={"question": question}, timeout=30)
-        if response.ok:
-            result = response.json()
-            st.subheader("Answer")
-            st.write(result["answer"])
-            st.caption(f"Detected intent: {result['intent']} · Interpretation: {result['interpretation_method']}")
-            st.subheader("Supporting figures")
-            data = result["data"]
-            if isinstance(data, list):
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True)
-                if "month" in df.columns and "net_revenue" in df.columns:
-                    st.line_chart(df.set_index("month")["net_revenue"])
-            else:
-                st.json(data)
-        else:
-            st.warning(response.json().get("detail", "The request could not be processed."))
-    except requests.RequestException as exc:
-        st.error(f"Request failed: {exc}")
-elif st.button("Show data quality summary"):
-    try:
-        summary = requests.get(f"{API_URL}/data-quality", timeout=10).json()
-        st.json(summary)
-    except requests.RequestException as exc:
-        st.error(str(exc))
+st.subheader("Ask your business question")
+
+with st.form("question_form"):
+    question = st.text_input(
+        "Enter your question",
+        placeholder="Example: What is the total revenue?"
+    )
+    submitted = st.form_submit_button(
+        "Analyze",
+        type="primary"
+    )
+
+
+if submitted:
+    if not question.strip():
+        st.warning("Please enter a question.")
+    else:
+        with st.spinner("Analyzing your question..."):
+            try:
+                interpreted = interpret_question(question)
+
+                if not interpreted:
+                    st.warning(
+                        "I could not understand that question. "
+                        "Please try one of the supported examples."
+                    )
+                else:
+                    result = run_analytics(
+                        interpreted["intent"],
+                        interpreted.get("month1"),
+                        interpreted.get("month2")
+                    )
+
+                    st.success(result["answer"])
+
+                    st.caption(
+                        f"Detected intent: {result['intent']} | "
+                        f"Interpretation method: "
+                        f"{interpreted.get('method', 'unknown')}"
+                    )
+
+                    data = result.get("data")
+
+                    if isinstance(data, dict):
+                        st.subheader("Analysis details")
+                        st.dataframe(
+                            pd.DataFrame([data]),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                    elif isinstance(data, list):
+                        st.subheader("Analysis details")
+                        df = pd.DataFrame(data)
+
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        if (
+                            result["intent"] == "monthly_trend"
+                            and not df.empty
+                        ):
+                            st.subheader("Monthly Revenue Trend")
+                            chart_data = df.set_index("month")[
+                                "net_revenue"
+                            ]
+                            st.bar_chart(chart_data)
+
+            except ValueError as error:
+                st.warning(str(error))
+            except Exception as error:
+                st.error(f"An error occurred: {error}")
+
 
 st.divider()
-st.caption("Prototype for the AI-Assisted Development Challenge.")
+
+with st.expander("Data Quality Information"):
+    st.write("Information about the database initialization:")
+
+    st.json(database_info)
+
+    st.caption(
+        "The database is initialized from the cleaned sales CSV file."
+    )
+
+
+st.caption(
+    "Mini AI Business Intelligence Assistant | "
+    "Python • Pandas • SQLite • Streamlit • FastAPI"
+)
